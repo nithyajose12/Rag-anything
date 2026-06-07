@@ -100,7 +100,12 @@ class QueryMixin:
         return f"multimodal_query:{cache_hash}"
 
     async def aquery(
-        self, query: str, mode: str = "mix", system_prompt: str | None = None, **kwargs
+        self, 
+        query: str, 
+        mode: str = "mix", 
+        system_prompt: str | None = None,
+        conversation_history: List[Dict[str, str]] | None = None,
+        **kwargs
     ) -> str:
         """
         Pure text query - directly calls LightRAG's query functionality
@@ -109,6 +114,8 @@ class QueryMixin:
             query: Query text
             mode: Query mode ("local", "global", "hybrid", "naive", "mix", "bypass")
             system_prompt: Optional system prompt to include.
+            conversation_history: Optional conversation history as list of dicts
+                                 with 'role' and 'content' keys
             **kwargs: Other query parameters, will be passed to QueryParam
                 - vlm_enhanced: bool, default True when vision_model_func is available.
                   If True, will parse image paths in retrieved context and replace them
@@ -139,7 +146,11 @@ class QueryMixin:
             and self.vision_model_func
         ):
             return await self.aquery_vlm_enhanced(
-                query, mode=mode, system_prompt=system_prompt, **kwargs
+                query, 
+                mode=mode, 
+                system_prompt=system_prompt,
+                conversation_history=conversation_history,
+                **kwargs
             )
         elif vlm_enhanced and (
             not hasattr(self, "vision_model_func") or not self.vision_model_func
@@ -158,6 +169,23 @@ class QueryMixin:
                 mode=mode,
             )
 
+        # Format conversation history and prepend to system prompt
+        enhanced_system_prompt = system_prompt
+        if conversation_history and len(conversation_history) > 0:
+            history_text = "\n\nConversation History for Context:\n"
+            for msg in conversation_history[-6:]:  # Last 3 exchanges (6 messages)
+                role = msg.get('role', 'unknown')
+                content = msg.get('content', '')
+                history_text += f"{role.capitalize()}: {content}\n"
+            
+            # Prepend to system prompt
+            if enhanced_system_prompt:
+                enhanced_system_prompt = history_text + "\n" + enhanced_system_prompt
+            else:
+                enhanced_system_prompt = history_text
+            
+            self.logger.info(f"Enhanced query with {len(conversation_history)} conversation messages")
+
         # Create query parameters
         query_param = QueryParam(mode=mode, **kwargs)
 
@@ -165,9 +193,9 @@ class QueryMixin:
         self.logger.info(f"Query mode: {mode}")
 
         try:
-            # Call LightRAG's query method
+            # Call LightRAG's query method with enhanced system prompt
             result = await self.lightrag.aquery(
-                query, param=query_param, system_prompt=system_prompt
+                query, param=query_param, system_prompt=enhanced_system_prompt
             )
         except Exception as exc:
             if callback_manager is not None:
@@ -351,6 +379,7 @@ class QueryMixin:
         query: str,
         mode: str = "mix",
         system_prompt: str | None = None,
+        conversation_history: List[Dict[str, str]] | None = None,
         extra_safe_dirs: List[str] = None,
         **kwargs,
     ) -> str:
@@ -361,6 +390,8 @@ class QueryMixin:
             query: User query
             mode: Underlying LightRAG query mode
             system_prompt: Optional system prompt to include
+            conversation_history: Optional conversation history as list of dicts
+                                 with 'role' and 'content' keys
             extra_safe_dirs: Optional list of additional safe directories to allow images from
             **kwargs: Other query parameters
 
@@ -383,6 +414,23 @@ class QueryMixin:
 
         self.logger.info(f"Executing VLM enhanced query: {query[:100]}...")
 
+        # Format conversation history and enhance system prompt
+        enhanced_system_prompt = system_prompt
+        if conversation_history and len(conversation_history) > 0:
+            history_text = "\n\nConversation History for Context:\n"
+            for msg in conversation_history[-6:]:  # Last 3 exchanges (6 messages)
+                role = msg.get('role', 'unknown')
+                content = msg.get('content', '')
+                history_text += f"{role.capitalize()}: {content}\n"
+            
+            # Prepend to system prompt
+            if enhanced_system_prompt:
+                enhanced_system_prompt = history_text + "\n" + enhanced_system_prompt
+            else:
+                enhanced_system_prompt = history_text
+            
+            self.logger.info(f"Enhanced VLM query with {len(conversation_history)} conversation messages")
+
         # Clear previous image cache
         if hasattr(self, "_current_images_base64"):
             delattr(self, "_current_images_base64")
@@ -400,17 +448,17 @@ class QueryMixin:
 
         if not images_found:
             self.logger.info("No valid images found, falling back to normal query")
-            # Fallback to normal query
+            # Fallback to normal query with enhanced system prompt
             query_param = QueryParam(mode=mode, **kwargs)
             return await self.lightrag.aquery(
-                query, param=query_param, system_prompt=system_prompt
+                query, param=query_param, system_prompt=enhanced_system_prompt
             )
 
         self.logger.info(f"Processed {images_found} images for VLM")
 
-        # 3. Build VLM message format
+        # 3. Build VLM message format with enhanced system prompt
         messages = self._build_vlm_messages_with_images(
-            enhanced_prompt, query, system_prompt
+            enhanced_prompt, query, enhanced_system_prompt
         )
 
         # 4. Call VLM for question answering
